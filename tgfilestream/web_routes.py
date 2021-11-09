@@ -51,10 +51,24 @@ def decrement_counter(ip: str) -> None:
     ongoing_requests[ip] -= 1
 
 
-async def handle_request(req: web.Request, head: bool = False) -> web.Response:
+async def handle_request(request: web.Request, head: bool = False):
+    range_header = request.headers.get('Range', 0)
     file_name = req.match_info["name"]
     file_id = int(req.match_info["id"])
-    peer, msg_id = unpack_id(file_id)
+    peer, message_id = unpack_id(file_id)
+    message_id=int(message_id)
+    
+    
+    if range_header:
+        from_bytes, until_bytes = range_header.replace('bytes=', '').split('-')
+        from_bytes = int(from_bytes)
+        until_bytes = int(until_bytes) if until_bytes else file_size - 1
+    else:
+        from_bytes = request.http_range.start or 0
+        until_bytes = request.http_range.stop or file_size - 1
+    
+    req_length = until_bytes - from_bytes
+        
     if not peer or not msg_id:
         return web.Response(status=404, text="404: Not Found")
 
@@ -62,24 +76,23 @@ async def handle_request(req: web.Request, head: bool = False) -> web.Response:
     if not message or not message.file or get_file_name(message) != file_name:
         return web.Response(status=404, text="404: Not Found")
 
-    size = message.file.size
+    file_size = message.file.size
     offset = req.http_range.start or 0
     limit = req.http_range.stop or size
 
-    if not head:
-        ip = get_requester_ip(req)
-        if not allow_request(ip):
-            return web.Response(status=429)
-        log.info(f"Serving file in {message.id} (chat {message.chat_id}) to {ip}")
-        body = transfer.download(message.media, file_size=size, offset=offset, limit=limit)
-    else:
-        body = None
-    return web.Response(status=206 if offset else 200,
-                        body=body,
-                        headers={
-                            "Content-Type": message.file.mime_type,
-                            "Content-Range": f"bytes {offset}-{size}/{size}",
-                            "Content-Length": str(limit - offset),
-                            "Content-Disposition": f'attachment; filename="{file_name}"',
-                            "Accept-Ranges": "bytes",
-                        })
+    body = transfer.download(message.media, file_size=size, offset=offset, limit=limit)
+    return_resp = web.Response(
+        status=206 if range_header else 200,
+        body=body,
+        headers={
+            "Content-Type": message.file.mime_type,
+            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+            "Content-Disposition": f'attachment; filename="{file_name}"',
+            "Accept-Ranges": "bytes",
+        }
+    )
+
+    if return_resp.status == 200:
+        return_resp.headers.add("Content-Length", str(file_size))
+
+    return return_resp
